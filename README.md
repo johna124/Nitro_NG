@@ -1,12 +1,8 @@
 # ⚡ NITRO NG (Next Gen) 1.05 HP
 
-![Version](https://shields.io)
-![Format](https://shields.io)
-![Platform](https://shields.io)
-![License](https://shields.io)
-
 > **BIT-EXACT OR DEATH. THE NORTH REMEMBERS EVERY BYTE.**
 
+<img src="https://raw.githubusercontent.com/johna124/Nitro_NG/refs/heads/main/nitro.avif" width="50%">
 ---
 
 ## 🏛️ Overview
@@ -45,7 +41,9 @@ Nitro NG serializes files into a sequential, linear `.pre` (PREC v14) container.
 
 ### Physical Disk Layout
 
-  +-------------------------------------------------------+
+  
+```text
+ +-------------------------------------------------------+
   |  GeneralPrecompHeader (Packed, Fixed 25 Bytes)        |
   +-------------------------------------------------------+
   |  EXPANDED PAYLOAD DATA                                |
@@ -56,6 +54,10 @@ Nitro NG serializes files into a sequential, linear `.pre` (PREC v14) container.
   |  -> Array of [StreamMetadata] blocks per stream       |
   |  -> Location offset = sizeof(Header) + h.expanded_size|
   +-------------------------------------------------------+
+```
+
+
+
 
 ### 🛡️ Strict Cryptographic Hardening
 To prevent Denial of Service (DoS) attacks or process crashes due to corrupt headers, the decoder enforces a strict validation check on boot:
