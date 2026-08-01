@@ -56,9 +56,6 @@ Nitro NG serializes files into a sequential, linear `.pre` (PREC v14) container.
   +-------------------------------------------------------+
 ```
 
-
-
-
 ### 🛡️ Strict Cryptographic Hardening
 To prevent Denial of Service (DoS) attacks or process crashes due to corrupt headers, the decoder enforces a strict validation check on boot:
 Expected Size == 25 + h.expanded_size + (h.num_streams * 26)
@@ -85,6 +82,85 @@ Any malicious file declaring phantom allocations (e.g., num_streams > 10,000,000
 
 *Resulting Payload Details:* Expanded to **1,815,238,228 bytes** (1.73 GB). Residual gaps preserved at **14,364,389 bytes** (exactly 4.1% of the original archive size). Unlocked true scalable parallel throughput across separate CPU dies on modern storage controllers.
 
+---
+### Comparison:
+
+```bash
+./nitro_ng-amd64 e setup_virtuaverse_1.37_\(57276\).exe virtua.pre
+============================
+ NITRO NG 1.05 HP - LINUX 
+============================
+Nitro-Linux-E 100.0% | Str: 671 | 11.95 MB/s | RAM: 0MB | Cache: 233 | Dict: 671 | Fall: 0 | 00:28 < 00:00 
+[OK] Precomp saved successfully!
+    Streams   : 671
+    Original  : 354340192 bytes (337.93 MB)
+    Expanded  : 1815238228 bytes (1731.15 MB)
+    Diff/Res  : 14364389 bytes (13.70 MB) - 4.1% of original
+    Levels    : 6
+    Cache     : 233/671 (34%)
+    Dict      : 671 reuse, 0 fallbacks
+    Total time: 28.3 seconds
+```
+---
+```bash
+./precomp -cn -intense -t-pnfjsmb3 setup_virtuaverse_1.37_\(57276\).exe 
+
+Precomp v0.4.8 Unix 32-bit - DEVELOPMENT version - USE AT YOUR OWN RISK!
+Free for non-commercial use - Copyright 2006-2021 by Christian Schneider
+  preflate v0.3.5 support - Copyright 2018 by Dirk Steinke
+
+Input file: setup_virtuaverse_1.37_(57276).exe
+Output file: setup_virtuaverse_1.37_(57276).pcf
+
+Using packJPG for JPG recompression, packMP3 for MP3 recompression.
+--> packJPG library v2.5k (01/22/2016) by Matthias Stirner / Se <--
+--> packMP3 library v1.0g (01/22/2016) by Matthias Stirner <--
+More about packJPG and packMP3 here: http://www.matthiasstirner.com
+
+100.00% - New size: 1817623095 instead of 354340192
+
+Done.
+Time: 2 minute(s), 15 second(s)
+
+Recompressed streams: 1800/1820
+ZIP streams: 6/6
+GZip streams: 0/2
+zLib streams (intense mode): 1794/1812
+```
+---
+```bash
+./nitro_ng-amd64 d virtua.pre virtua.exe
+============================
+ NITRO NG 1.05 HP - LINUX 
+============================
+Nitro-Linux-D 100.0% | Str: 671 | 18.30 MB/s | RAM: 0MB | Cache: 0 | Dict: 671 | Fall: 0 | 00:18 < 00:00
+[OK] Precomp decoded successfully!
+    Streams   : 671
+    Original  : 354340192 bytes
+    Dict      : 671 reuse, 0 fallbacks
+    Total time: 18.5 seconds
+```
+---
+```bash
+./precomp -r setup_virtuaverse_1.37_\(57276\).pcf 
+
+Precomp v0.4.8 Unix 32-bit - DEVELOPMENT version - USE AT YOUR OWN RISK!
+Free for non-commercial use - Copyright 2006-2021 by Christian Schneider
+preflate v0.3.5 support - Copyright 2018 by Dirk Steinke
+
+Input file: setup_virtuaverse_1.37_(57276).pcf
+Output file: setup_virtuaverse_1.37_(57276).exe
+
+Using packJPG for JPG recompression, packMP3 for MP3 recompression.
+--> packJPG library v2.5k (01/22/2016) by Matthias Stirner / Se <--
+--> packMP3 library v1.0g (01/22/2016) by Matthias Stirner <--
+More about packJPG and packMP3 here: http://www.matthiasstirner.com
+
+100.00% -
+
+Done.
+Time: 52 second(s), 947 millisecond(s)
+```
 ---
 
 ## 🛠️ Compilation Guideliness
