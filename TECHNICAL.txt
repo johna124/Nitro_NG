@@ -1,0 +1,113 @@
+================================================================================
+             SPECIFICATION FILE: THE PREC CONTAINER FORMAT (v14)
+================================================================================
+
+This document defines the binary structure and memory layout design of the '.pre' 
+(PREC) file format, used by the Nitro NG engine for bit-exact preservation of 
+Zlib data compression streams.
+
+--------------------------------------------------------------------------------
+I. GENERAL CONTAINER DESIGN
+--------------------------------------------------------------------------------
+
+The PREC file is structured sequentially to allow high-speed reads using 
+asynchronous I/O and direct mapping. 
+
+It is strictly divided into three physical zones:
+
++-------------------------------------------------------+
+| GeneralPrecompHeader (1 byte aligned, fixed 25 bytes) |
++-------------------------------------------------------+
+| EXPANDED DATA BODY (Gaps + Inflated Streams)          |
+| -> Exact length = h.expanded_size bytes               |
++-------------------------------------------------------+
+| STREAM METADATA TABLE (StreamMetadata x N)            |
+| -> Location = sizeof(Header) + h.expanded_size        |
++-------------------------------------------------------+
+
+--------------------------------------------------------------------------------
+II. BINARY HEADER STRUCTURES (Pack = 1 byte)
+--------------------------------------------------------------------------------
+The structures are packaged without compiler padding to ensure cross-platform binary 
+portability between Windows (PE) and Linux (ELF).
+
+1. GeneralPrecompHeader (Size: 25 Bytes)
+Offset Type Name Description
+-------------------------------------------------------------------------
+0x00 char[4] magic Fixed magic signature: {'P','R','E','C'}
+0x04 uint8_t version Format version (Fixed: 14 / 0x0E)
+0x05 uint64_t original_size Size in bytes of the original raw file
+0x0D uint32_t num_streams Total number of Zlib streams detected
+0x11 uint64_t expanded_size Size of the central data section
+
+2. StreamMetadata (Size: 26 Bytes per entry)
+   Represents the retrieval descriptor for each modified Zlib stream.
+
+Offset Type Name Description
+-------------------------------------------------------------------------
+0x00 uint64_t offset Relative position in the expanded body
+0x08 uint64_t dec_size Original size of the uncompressed stream
+0x10 uint32_t comp_size Original size of the compressed stream
+0x14 uint8_t level Identical Zlib level (1, 6, or 9)
+0x15 int8_t windowBits Window parameter (15 = Zlib, -15 = Raw)
+
+--------------------------------------------------------------------------------
+III. SEQUENTIAL RECONSTRUCTION PROTOCOL (DECODER PIPELINE)
+--------------------------------------------------------------------------------
+To restore the original bit-exact file without maintaining heavy maps in RAM, 
+the decoder performs a double physical pointer synchronization:
+
+1. The input cursor 'pcf_read_ptr' moves exclusively through the expanded 
+   data section of the PREC file (Input).
+2. The output cursor 'g_write_ptr' moves sequentially through the reconstructed 
+    final file (Output).
+
+Block processing steps:
+
+A. Distance to the next Stream (Gap Calculation):
+The physical distance is calculated: gap = sm.offset - pcf_read_ptr.
+
+If gap > 0, these bytes correspond to flat data that was not Zlib. 
+The engine performs a block read (pread) from the current position and writes them 
+directly to the output. Both cursors advance exactly 'gap' bytes.
+
+B. Synchronous Stream Recompression:
+The hardware threads extract 'sm.dec_size' bytes of expanded data from the 
+central body of the PREC file. The block is sent to the Zlib dictionary cache pool, 
+where a 'deflateReset()' is executed, configured with the exact parameters 
+'sm.level' and 'sm.windowBits'.
+
+C. Bit-Exact Validation Barrier (Fallback Mechanism):
+- Optimal Condition: If Zlib returns 'Z_STREAM_END' and the final size 'actual_out' 
+  matches 'sm.comp_size' exactly, the compressed block is injected directly 
+  into the output file.
+
+- Fallback Condition: If a minor byte variation occurs due to system library updates, 
+  the 'rec' vector is forced to the size 'sm.comp_size', and controlled padding is 
+  performed to maintain the alignment of the overall file pointers, preventing logical mismatches.
+
+D. Cursor Updates:
+Upon completion of the block, the pointers are updated asymmetrically:
+
+pcf_read_ptr += sm.dec_size; // Skips the expanded data read from PREC.
+g_write_ptr += rec.size(); // Advances the actual compressed size in the output.
+
+E. Tail Processing:
+Upon completion of the stream loop (write_stream_id == num_streams), the final 
+remaining flat data is calculated as: tail = h.expanded_size - pcf_read_ptr.
+
+If tail > 0, it is written directly to the output to seal the file.
+
+--------------------------------------------------------------------------------
+IV. INTEGRITY VERIFICATION
+--------------------------------------------------------------------------------
+The PREC format guarantees immunity to pointer corruption by separating the metadata 
+table from the continuous intermediate data stream. A PREC file is valid if and only 
+if the total size of the physical file on disk meets the following:
+
+Total_Size == sizeof(GeneralPrecompHeader) + h.expanded_size + (h.num_streams * sizeof(StreamMetadata))
+
+================================================================================
+[EOF] END OF SPECIFICATION -
+================================================================================
+

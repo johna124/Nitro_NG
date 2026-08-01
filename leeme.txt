@@ -1,0 +1,92 @@
+================================================================================
+ _______  .________________________ ________     _______    ________ 
+ \      \ |   \__    ___/\______   \\_____  \    \      \  /  _____/ 
+ /   |   \|   | |    |    |       _/ /   |   \   /   |   \/   \  ___ 
+/    |    \   | |    |    |    |   \/    |    \ /    |    \    \_\  \
+\____|__  /___| |____|    |____|_  /\_______  / \____|__  /\______  /
+        \/                       \/         \/          \/        \/ 
+================================================================================
+             --- THE SHARDED ENGINE OF THE CONCURRENT NORTH ---
+================================================================================
+
+[OVERVIEW]
+En los salones donde el silicio ancestral se niega a morir, donde las CPUs de la 
+vieja guardia resisten el paso del tiempo, nace NITRO NG (Next Gen). Un motor 
+asíncrono de precompresión lineal, forjado nativamente para Linux, diseñado con 
+un único propósito sagrado: desgarrar contenedores opacos (Unreal .pak, setups 
+de GOG), localizar flujos de compresión Zlib ocultos en la piedra, e inflarlos 
+hacia su estado expandido con una precisión matemática bit-exacta.
+
+Mientras que los motores del pasado colapsaban bajo el peso de Preflate o se 
+ahogaban en la asignación masiva de memoria dinámica, Nitro NG corta el nudo 
+gordiano. Con un ejecutable estático de apenas 1.7 MB, es capaz de caber entero 
+dentro de la caché L2 física de un Intel Core 2 Quad Q6600, ejecutándose a la 
+velocidad de la luz sin tocar el montón (heap) del sistema operativo.
+
+Esto no es software genérico. Esto es orfebrería de hardware clásica orientada 
+a datos (Data-Oriented Design) llevada al límite absoluto del silicio.
+
+--------------------------------------------------------------------------------
+[THE PILLARS OF PERFORMANCE]
+--------------------------------------------------------------------------------
+
+1. CACHÉ INTELIGENTE LOCK-FREE (65,536 SLOTS)
+   El escáner no adivina; recuerda. Mediante un algoritmo de mezcla FNV-1a de 
+   un solo paso y lectura directa de 64 bits, el motor calcula la huella dactilar 
+   (fingerprint) de los primeros bytes del flujo comprimido. Si el patrón ya ha 
+   sido vencido por fuerza bruta (niveles 6, 9, 1), las siguientes iteraciones 
+   saltan directamente al nivel correcto, ahorrando miles de millones de ciclos 
+   de reloj redundantes.
+
+2. ARQUITECTURA PARALELA POR SHARDS (ANTI-FALSE SHARING)
+   Para evitar que los núcleos de la CPU luchen entre sí por el control de la 
+   tabla de diccionarios, la caché global de Zlib se divide en 16 Shards 
+   independientes. Cada Slot está blindado con un padding físico de 64 bytes, 
+   levantando una barrera infranqueable que impide que un núcleo invalide la 
+   caché L1/L2 del núcleo adyacente. Concurrencia atómica pura (Acquire-Release) 
+   con un algoritmo de robo de slots (LRU Stealing) que garantiza un rendimiento 
+   predecible bajo carga extrema.
+
+3. OPTIMIZACIÓN ZERO-COPY & DMA
+   Los bloques de datos planos (gaps) que no son Zlib no se copian en RAM. El 
+   motor elimina los "buffers intermedios" tradicionales. Utilizando el mapeo 
+   de memoria nativo del kernel de Linux (mmap), los datos fluyen directamente 
+   desde el almacenamiento físico hacia el sistema de archivos a través de DMA, 
+   vaciando el bus de memoria y estirando el ancho de banda del SSD NVMe/SATA.
+
+4. POOLS DE BUFFERS PERSISTENTES (CERO MALLOC)
+   Tanto en la compresión como en la descompresión, los hilos de hardware reservan 
+   sus buffers de trabajo (16MB para vtmp, 64KB para inflate) una única vez al 
+   arrancar. Durante el bucle caliente de datos, se ejecutan redimensionamientos 
+   incondicionales (.resize()) que encogen el tamaño lógico en 0 ciclos de CPU 
+   mientras retienen la capacidad física intacta en caliente. El recolector de 
+   basura de Linux no trabaja; Nitro NG es el dueño de la memoria.
+
+5. El programa usa las ideas de precomp classic y Xtool con su libreria zlib 
+   optimizada, el resultado es un binario más liviano y su código es muchisimo más 
+   pequeño, en este caso no hemos modificado la libreria zlib sino que jugamos 
+   con los valores de niveles de compresión
+
+6. Este programa NO está diseñado para ficheros PNG ni ZIP ni PDF, es para 
+   ficheros con compresión zlib normal como por ejemplo los .pak de Unreal o 
+   los setup gog se comporta de maravilla.
+
+--------------------------------------------------------------------------------
+[COMPILATION & COMMANDS]
+--------------------------------------------------------------------------------
+
+Para despertar el poder rúnico del hardware clásico (Core 2 Quad / Arquitectura 
+POSIX), el enlazador estático debe purgar el código muerto quirúrgicamente:
+
+  $ g++ -O3 -march=core2 -mtune=core2 -fomit-frame-pointer -DNDEBUG -std=c++20 \
+    main.cpp -lz -lpthread -static -static-libgcc -static-libstdc++ \
+    -Wl,--gc-sections -s -o nitro_ng
+
+Uso del Motor:
+  Compresión : ./nitro_ng e input.pak output.pre -j 2
+  Restauración: ./nitro_ng d output.pre restaurado.pak -j 2
+
+================================================================================
+        BIT-EXACT OR DEATH. THE NORTH REMEMBERS EVERY BYTE.
+================================================================================
+
