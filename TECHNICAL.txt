@@ -1,0 +1,122 @@
+================================================================================
+SPECIFICATION FILE: THE PREC CONTAINER FORMAT (v13)
+================================================================================
+This document defines the binary structure and memory layout design of the '.pre'
+(PREC) file format, used by the Nitro NG engine for bit-exact preservation of
+Zlib and raw deflate compression streams.
+
+--------------------------------------------------------------------------------
+I. GENERAL CONTAINER DESIGN
+--------------------------------------------------------------------------------
+The PREC file is structured sequentially to allow high-speed reads using
+segmented I/O (pread on Linux, ReadFile with OVERLAPPED on Windows).
+It is strictly divided into three physical zones:
+
++-------------------------------------------------------+
+| GeneralPrecompHeader (1 byte aligned, fixed 25 bytes) |
++-------------------------------------------------------+
+| EXPANDED DATA BODY (Gaps + Inflated Streams)          |
+| -> Exact length = h.expanded_size bytes               |
++-------------------------------------------------------+
+| STREAM METADATA TABLE (StreamMetadata x N)            |
+| -> Location = sizeof(Header) + h.expanded_size        |
++-------------------------------------------------------+
+
+The encoder reads the input file in segments (1-8 MB each, aligned to 64 KB)
+assigned to worker threads in strict sequential order. A sliding window
+(W = num_threads * 2 + 2) prevents workers from advancing too far ahead of
+the writer, bounding memory usage regardless of input file size.
+
+--------------------------------------------------------------------------------
+II. BINARY HEADER STRUCTURES (Pack = 1 byte)
+--------------------------------------------------------------------------------
+The structures are packaged without compiler padding (#pragma pack(push, 1))
+to ensure cross-platform binary portability between Windows (PE) and Linux (ELF).
+
+1. GeneralPrecompHeader (Size: 25 Bytes)
+
+Offset   Type       Name             Description
+-------------------------------------------------------------------------
+0x00     char[4]    magic            Fixed magic signature: {'P','R','E','C'}
+0x04     uint8_t    version          Format version (Fixed: 13 / 0x0D)
+0x05     uint64_t   original_size    Size in bytes of the original raw file
+0x0D     uint32_t   num_streams      Total number of streams detected
+0x11     uint64_t   expanded_size    Size of the central data section
+
+2. StreamMetadata (Size: 22 Bytes per entry)
+Represents the retrieval descriptor for each modified stream.
+
+Offset   Type       Name             Description
+-------------------------------------------------------------------------
+0x00     uint64_t   offset           Relative position in the expanded body
+0x08     uint64_t   dec_size         Size of the uncompressed stream
+0x10     uint32_t   comp_size        Original size of the compressed stream
+0x14     uint8_t    level            Zlib compression level (1-9)
+0x15     int8_t     windowBits       Window parameter (15 = Zlib, -15 = Raw)
+
+Note: Streams are detected in two forms:
+  - Standard Zlib: identified by the 0x78 header byte followed by a valid
+    FLG byte (0x01, 0x5E, 0x9C, or 0xDA). Uses windowBits = 15.
+  - Raw deflate: identified by the ASCII pattern "stream" followed by
+    whitespace. Uses windowBits = -15 (no Zlib header/checksum).
+
+--------------------------------------------------------------------------------
+III. SEQUENTIAL RECONSTRUCTION PROTOCOL (DECODER PIPELINE)
+--------------------------------------------------------------------------------
+To restore the original bit-exact file without maintaining heavy maps in RAM,
+the decoder performs a double physical pointer synchronization:
+
+1. The input cursor moves exclusively through the expanded data section of
+   the PREC file.
+2. The output cursor moves sequentially through the reconstructed final file.
+
+Block processing steps:
+
+A. Distance to the next Stream (Gap Calculation):
+   The physical distance is calculated: gap = sm.offset - current_data_ptr.
+   If gap > 0, these bytes correspond to flat data that was not compressed.
+   The engine performs a block read directly to the output.
+
+B. Synchronous Stream Recompression:
+   Worker threads extract expanded data from the central body of the PREC file.
+   Each worker reuses a Deflater structure configured with the exact parameters
+   'sm.level' and 'sm.windowBits' via deflateReset(). The expanded data is
+   re-compressed in streaming mode using chunked deflate operations.
+
+C. Bit-Exact Validation Barrier:
+   The re-compressed output must match 'sm.comp_size' exactly. If the final
+   deflate operation returns Z_STREAM_END and zs.total_out == sm.comp_size,
+   the compressed block is injected directly into the output file.
+   If validation fails, the decoder aborts with an error. There is no padding
+   or fallback mechanism: bit-exact restoration is mandatory.
+
+D. Tail Processing:
+   Upon completion of the stream loop, the final remaining flat data is written
+   directly to the output to seal the file.
+
+The decoder uses a task-based worker pool with bounded in-flight memory
+(BUDGET = 64 MB, MAXWIN = 512 tasks) to prevent unbounded queue growth while
+maintaining parallelism on multi-core systems.
+
+--------------------------------------------------------------------------------
+IV. INTEGRITY VERIFICATION
+--------------------------------------------------------------------------------
+The PREC format guarantees immunity to pointer corruption by separating the
+metadata table from the continuous intermediate data stream. A PREC file is
+valid if and only if the total size of the physical file on disk meets the
+following:
+
+Total_Size == sizeof(GeneralPrecompHeader) + h.expanded_size
+            + (h.num_streams * sizeof(StreamMetadata))
+
+Additionally, the decoder validates:
+  - Magic signature matches "PREC"
+  - Version field equals 13
+  - Metadata table offset does not exceed file size
+  - Each stream's offset and dec_size are within bounds
+  - Streams are ordered by offset (no overlaps)
+  - Final restored size matches h.original_size
+
+================================================================================
+[EOF] END OF SPECIFICATION - PREC v13
+================================================================================

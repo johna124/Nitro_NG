@@ -1,0 +1,404 @@
+================================================================================
+NITRO ENGINE - ARCHITECTURAL CHANGELOG: v1.05 HP → v1.07 HP → v1.09
+================================================================================
+Version chain:
+v1.05 HP  →  v1.07 HP  →  v1.09
+
+[GENERAL CHANGELOG]
+The v1.05 HP release introduced multithreading but suffered from un-throttled
+heap allocations under high core counts and dense stream distributions. This
+occurred because asynchronous producer threads executed much faster than the
+sequential disk writer could flush, leading to unbounded queue growth and
+massive per-thread buffer pre-allocations.
+
+Version 1.07 HP directly resolves these architectural bottlenecks and introduces
+major milestone features: lock-free atomic telemetry, EMA-based ETA smoothing,
+a multi-threaded parallel decoder, a Windows Zero-Map reader to eradicate RAM
+bloat, and full native deployment support for 32-bit Windows XP alongside Linux
+and Windows x64 environments.
+
+Version 1.09 represents a complete architectural rewrite. We eliminated the
+memory-mapped I/O layer, the FNV-1a fingerprint cache, and the sharded zlib
+dictionary cache entirely. In their place, we introduced a streaming verification
+model, segmented I/O with backpressure, and FLEVEL-based candidate guidance.
+The result is a tool that maintains strictly bounded memory usage regardless of
+input file size or stream density, while achieving faster encode/decode times
+and smaller output files.
+
+================================================================================
+SECTION A - VERSION v1.05 HP
+MULTITHREADED PIPELINE FOUNDATION & ARCHITECTURAL LIMITATIONS
+================================================================================
+--------------------------------------------------------------------------------
+1. CORE MULTITHREADED FOUNDATION
+--------------------------------------------------------------------------------
+* Introduced worker-thread-based parallel processing.
+* Encoder input space was divided into thread chunks.
+* Each worker scanned its assigned region independently.
+* Worker progress heads were tracked with atomic counters.
+* Concurrent scanning for compressed payloads, standard zlib headers, and raw
+"stream"-style payloads with parallel verification.
+--------------------------------------------------------------------------------
+2. KNOWN v1.05 HP ARCHITECTURAL LIMITATIONS
+--------------------------------------------------------------------------------
+* Un-throttled heap allocation under high core counts.
+* Asynchronous producer threads outpaced the sequential disk writer.
+* Pending stream queue could grow without bound.
+* Large per-thread buffer pre-allocations caused massive memory spikes.
+* Memory footprint scaled dangerously with thread count and stream density.
+* Multi-gigabyte RAM spikes were possible on dense archives.
+
+================================================================================
+SECTION B - VERSION v1.07 HP
+MAJOR MILESTONES, MEMORY STABILIZATION & PLATFORM EXPANSION
+================================================================================
+--------------------------------------------------------------------------------
+1. LOCK-FREE ATOMIC TELEMETRY & EMA ETA ESTIMATION
+--------------------------------------------------------------------------------
+* Lock-Free Telemetry Counters
+- Real-time statistics are sampled from a dedicated progress thread using
+relaxed-order atomic operations (`std::memory_order_relaxed`).
+- Telemetry reads do not acquire mutexes and introduce zero contention
+into encoder/decoder worker threads.
+- Peak memory and speed are updated safely through relaxed CAS loops
+(`compare_exchange_weak`).
+* EMA-Based ETA Smoothing
+- Added an Exponential Moving Average (EMA) speed estimator for remaining
+time calculation.
+- Effectively smooths short bursts and prevents violent ETA oscillation
+on dense stream distributions or fluctuating disk throughput.
+* Dedicated Ticker Thread (~10 Hz)
+- Progress sampling runs independently on a background ticker thread,
+keeping worker threads completely free from console formatting overhead.
+
+--------------------------------------------------------------------------------
+2. MULTI-THREADED PARALLEL DECODER
+--------------------------------------------------------------------------------
+* Task-Based Recompression Pool
+- Replaced the legacy sequential decoder with an active task-based worker pool.
+- Workers fetch tasks dynamically via `std::atomic<int>` fetch-add.
+- Dramatically accelerates restoration speed by 2x to 3x on multi-core hardware.
+- Main thread coordinates sequential output writes via condition variables.
+
+--------------------------------------------------------------------------------
+3. WINDOWS ZERO-MAP READER (RAM FOOTPRINT STABILIZATION)
+--------------------------------------------------------------------------------
+* Eradication of File-Mapping RAM Bloat on Windows
+- Eliminated `MapViewOfFile` from the decoder pipeline on Windows.
+- Replaced with a direct, efficient *Zero-Map Stream Reader* using Win32
+overlapped handles (`portable_pread`).
+- Prevents the Windows memory manager from aggressively caching massive
+`.pre` archives in physical RAM.
+- Keeps the peak memory footprint pinned to a clean ~40-50 MB, matching Linux.
+
+--------------------------------------------------------------------------------
+4. WINDOWS XP 32-BIT DEPLOYMENT TARGET
+--------------------------------------------------------------------------------
+* Native Cross-Compilation Support
+- Added cross-compilation infrastructure via MinGW-w64 (`i686-w64-mingw32-g++-posix`).
+- PE binary is explicitly marked for the Windows XP console subsystem
+(Major/Minor version 5.01).
+- Large-address-aware linking (`-Wl,--large-address-aware`) permits up to ~3 GB
+of user-mode address space on XP systems configured with the `/3GB` switch.
+- Hybrid encoder fallback (`portable_pread`) eliminates the 2GB file size
+ceiling on 32-bit systems.
+
+--------------------------------------------------------------------------------
+5. ORIGINAL UX PRESERVATION & CURSOR POLISH
+--------------------------------------------------------------------------------
+* Single-Line Live Progress UX
+- Retains the clean one-line live progress format with carriage return updates.
+- Windows console cursor is hidden during execution to eliminate flicker.
+- Space-padding prevents stale artifacts or lingering digits when text length shortens.
+
+--------------------------------------------------------------------------------
+6. LOCK-FREE FNV-1a FINGERPRINT CACHE (~38% HIT RATE)
+--------------------------------------------------------------------------------
+* 64-bit FNV-1a hashing algorithm (0xcbf29ce484222325ULL, 0x100000001b3ULL)
+* Hashes the first bytes of encountered compressed layers
+* If pattern already solved across zlib levels {6, 9, 1}, subsequent threads
+bypass evaluation entirely
+* Cache size: 65536 entries (NitroCacheEntry)
+
+--------------------------------------------------------------------------------
+7. SHARDED ZLIB DICTIONARY CACHE (ANTI-FALSE SHARING)
+--------------------------------------------------------------------------------
+* 2048 total slots (Windows) or 8192 slots (Linux)
+* Split into 16 independent shards with 64-byte padding blocks
+* Each slot maintains a z_stream state with deflateReset() for reuse
+* LRU eviction when all slots in a shard are occupied
+* Emergency fallback: allocates new z_stream if cache is exhausted
+
+--------------------------------------------------------------------------------
+8. PREC CONTAINER FORMAT v14 (outdated)
+--------------------------------------------------------------------------------
+* Sequential linear container with metadata at tail
+* GeneralPrecompHeader (25 bytes) + Expanded Payload + StreamMetadata Table
+* StreamMetadata: 26 bytes per entry (offset, dec_size, comp_size, level, windowBits)
+
+================================================================================
+VERIFICATION METRICS (v1.07 HP)
+================================================================================
+* Integrity: 100% verified, bit-for-bit restoration matches original input (MD5 confirmed).
+* RAM Footprint: Bounded and deterministic (~41 MB Linux, ~52 MB Windows Zero-Map).
+* Static Binary Size: ~1008 KB (Win64), ~1.4 MB (WinXP x86), ~1.7 MB (Linux Native).
+
+================================================================================
+SECTION C - VERSION v1.09
+COMPLETE ARCHITECTURAL REWRITE: STREAMING VERIFICATION & BOUNDED MEMORY
+================================================================================
+--------------------------------------------------------------------------------
+1. WHY THE REWRITE WAS NECESSARY
+--------------------------------------------------------------------------------
+The v1.07 HP encoder worked well for typical workloads, but it had fundamental
+architectural limitations:
+* Memory-mapped I/O (mmap/MapViewOfFile) caused virtual address space exhaustion
+on large files and aggressive OS caching that inflated physical RAM usage.
+* The FNV-1a fingerprint cache (65536 entries) added complexity without adapting
+to workload characteristics; 62% of streams still required full evaluation.
+* The sharded zlib dictionary cache (16 shards with padding blocks) consumed
+significant memory and required LRU eviction logic plus emergency fallback.
+* Per-thread buffer pre-allocations (16 MB dec_buf, 16 MB vtmp_pool, 64 KB
+inflate_pool per thread) wasted memory when actual stream sizes were smaller.
+* The pending_map/pending_streams queue could grow unbounded under high stream
+density, causing RAM spikes to 1-2 GB on dense archives.
+
+The solution was simple in concept but required rethinking the entire pipeline:
+don't store decompressed data at all. Instead, verify streams on-the-fly by
+inflating and immediately re-deflating, comparing byte-by-byte against the
+original input. If the recompressed output matches the original compressed
+stream, the stream is valid. If not, abort immediately.
+
+--------------------------------------------------------------------------------
+2. ELIMINATED COMPONENTS (What We Removed)
+--------------------------------------------------------------------------------
+* Memory-Mapped I/O
+- REMOVED: mmap() on Linux, MapViewOfFile() on Windows
+- REPLACED WITH: Segmented pread() on Linux, ReadFile with OVERLAPPED on Windows
+- RATIONALE: mmap/MapViewOfFile cause virtual address space exhaustion and
+aggressive OS caching. Segmented I/O with explicit offsets gives us full
+control over memory usage and eliminates working set bloat.
+
+* FNV-1a Fingerprint Cache
+- REMOVED: NitroCacheEntry array (65536 entries)
+- REMOVED: generate_nitro_fingerprint() function
+- REMOVED: g_nitro_intel_cache global variable
+- REMOVED: g_cache_hits telemetry counter
+- RATIONALE: The fingerprint cache was a heuristic optimization that worked
+well for typical workloads but added complexity and memory overhead. With
+the new FLEVEL-based candidate guidance (see below), we achieve better
+hit rates without a separate cache layer.
+
+* Sharded Zlib Dictionary Cache
+- REMOVED: ZlibDictCache class with 16 shards
+- REMOVED: ZlibDictSlot structure with atomic in_use flags
+- REMOVED: g_dict_cache_ptr global unique_ptr
+- REMOVED: g_dict_reuse and g_dict_fallbacks telemetry counters
+- REMOVED: service_zlib_cache_trim() function
+- REMOVED: --cache and --mem command-line options
+- RATIONALE: The sharded cache was designed to minimize lock contention, but
+it added significant memory overhead (16 shards * padding blocks) and
+complexity (LRU eviction, emergency fallback). In v1.09, each worker thread
+maintains its own Inflater/Deflater pair with deflateReset()/inflateReset(),
+which is simpler and uses less memory.
+
+* Per-Thread Buffer Pre-allocation
+- REMOVED: dec_buf.reserve(16 * 1024 * 1024) per worker
+- REMOVED: vtmp_pool (16 MB + 64 KB per thread)
+- REMOVED: inflate_pool (64 KB per thread * 2)
+- REPLACED WITH: ByteBuf with dynamic growth and release() method
+- RATIONALE: Pre-allocating large buffers per thread wastes memory when the
+actual stream sizes are much smaller. ByteBuf grows on demand and can be
+released when no longer needed.
+
+* BufferPool Class
+- REMOVED: BufferPool class with mutex-protected vector of buffers
+- RATIONALE: BufferPool was designed to reuse large buffers across threads,
+but it added mutex contention and complexity. In v1.09, each Slot maintains
+its own ByteBuf that can be reused across segments.
+
+--------------------------------------------------------------------------------
+3. NEW ARCHITECTURAL COMPONENTS (What We Added)
+--------------------------------------------------------------------------------
+* Streaming Verification Model
+- Scanner threads NO LONGER store decompressed data in memory
+- Instead, they verify streams on-the-fly:
+  1. Inflate a chunk (64 KB)
+  2. Immediately re-deflate it
+  3. memcmp against the original compressed bytes
+  4. If match, stream is valid; if not, abort instantly
+- Zero intermediate storage, zero RAM bloat
+- First mismatch aborts verification, saving CPU cycles
+
+* Segmented I/O with Backpressure
+- Input file is divided into segments (1-8 MB each, aligned to 64 KB)
+- Segments are assigned to worker threads in strict sequential order
+- Sliding window: W = num_threads * 2 + 2
+- Workers cannot advance beyond writer_seg + W
+- This backpressure mechanism ensures at most W segments are in-flight
+- Memory usage is bounded by W * segment_size, regardless of file size
+
+* FLEVEL-Based Candidate Guidance
+- The zlib header's FLEVEL byte (0x01/0x5E/0x9C/0xDA) indicates compression class
+- Encoder tries the most likely level first based on FLEVEL:
+  - Class 0 (FLEVEL=0x01): try level 1
+  - Class 1 (FLEVEL=0x5E): try levels 5, 4, 3, 2
+  - Class 2 (FLEVEL=0x9C): try level 6
+  - Class 3 (FLEVEL=0xDA): try levels 9, 8, 7
+- Last successful level is remembered per class (last_win_[5] array)
+- Reduces failed verification attempts by 30-40%
+
+* ByteBuf with Dynamic Growth
+- Replaces fixed-size buffers with dynamically growing ByteBuf
+- reserve() grows buffer by 1.5x when needed
+- fresh() reallocates if current capacity is insufficient
+- release() frees memory when buffer is no longer needed
+- Each Slot maintains its own ByteBuf that can be reused across segments
+
+* OutWriter with Buffered Output
+- 8 MB output buffer (OUT_BUF_SIZE)
+- Accumulates writes and flushes when buffer is full
+- Reduces number of syscalls and improves I/O efficiency
+- space() and commit() allow zero-copy writes from inflate
+
+* Inflater/Deflater with Reset
+- Each worker thread maintains its own Inflater and Deflater
+- inflateReset() and deflateReset() reuse z_stream state
+- Simpler than sharded cache, uses less memory
+- No lock contention, no LRU eviction, no emergency fallback
+
+* Prec Container Format v13
+- CHANGED: Version field from 14 to 13
+- CHANGED: StreamMetadata size from 26 bytes to 22 bytes
+- RATIONALE: The v14 format was never released. The v13 format is the actual
+format used by v1.09. StreamMetadata is 22 bytes (not 26) due to packing:
+uint64_t offset (8) + uint64_t dec_size (8) + uint32_t comp_size (4) +
+uint8_t level (1) + int8_t windowBits (1) = 22 bytes
+
+* OutWriter with Dynamic Adaptive Buffering (The Low-RAM Update)
+- CHANGED: Removed the hardcoded 8 MB OUT_BUF_SIZE constant from the writer pipeline.
+- REPLACED WITH: Dynamic core-aware buffering. The OutWriter capacity scales natively 
+  based on runtime thread allocation:
+  * Low-Thread / HDD Profile (num_threads <= 2): Caps the output buffer at 2 MB. 
+    This prevents physical disk cache congestion (thrashing) on classic mechanical 
+    hard drives and keeps the streaming timeline tightly synchronized with I/O bounds.
+  * High-Thread / NVMe Profile (num_threads > 2): Expands the output buffer to 16 MB 
+    to maximize sequential write grouping and feed modern high-throughput solid-state storage.
+- RATIONALE: Fixed-size massive buffers degrade random write performance on legacy storage, 
+  while fixed-size tiny buffers choke high-speed NVMe pipelines. Dynamic sizing bridges 
+  the architectural gap between vintage and cutting-edge host systems.
+
+* Thread Slot Backpressure & Conditional Memory Reclamation
+- CHANGED: Overrode the passive, threshold-based cache retention logic inside the 
+  main loop (`sl.buf.cap > seg_size + 8 * EXT_STEP`).
+- REPLACED WITH: Conditional aggressive heap reclamation based on hardware profiles:
+  * On Low-Thread configurations (<= 2 threads), the pipeline enforces an immediate 
+    and unconditional `sl.buf.release()` upon writing the segment to disk. This drops 
+    the active heap footprint to 0 bytes per slot instantly, preventing latent 
+    memory pooling in the allocator.
+  * On High-Thread configurations (> 2 threads), the system preserves the original 
+    behavior, retaining allocation arenas to minimize global heap lock contention 
+    across large multi-core thread clusters.
+- BENEFIT: Eviscerates hidden memory spikes. Encoder Peak RAM drops to ~88-89 MB under 
+  Wine/Windows, while Decoder RAM stabilizes at a flat 45-51 MB of pure RSS memory, 
+  matching the footprint performance of ancient single-threaded compression tools.
+
+--------------------------------------------------------------------------------
+4. HYBRID PERFORMANCE BENCHMARK (THE ADAPTIVE VERIFICATION CYCLE)
+--------------------------------------------------------------------------------
+Summary of chronological cross-platform performance data using a dense stream distribution workload 
+(**352.78 MB input, 694 zlib streams, setup_virtuaverse_1.38_(92629).exe):
+
+Used DualCore with Wine 6.0.3
+
+ENCODE PHASE (Compression Analysis)
+
+Engine Version               Environment/Runtime   Peak RAM   Encode Time   Pipeline Architecture & Control
+---------------------------------------------------------------------------------------------------------------------------
+Nitro NG v1.03 (precomp_zlib) Windows x64 (Wine)    1183 MB    2m 18.754s    First Release / Unbounded Heap Allocation
+Nitro NG v1.05                Windows x64 (Wine)    1647 MB    2m 33.438s    Concurrent Multi-thread / Unthrottled Allocation Bloat
+Nitro NG v1.09                Windows x64 (Wine)    89 MB      1m 36.744s    Adaptive Backpressure & Aggressive Slot Release
+Nitro NG v1.09                Linux Native (Raw)    104 MB     1m 26.949s    Linear Streaming / Direct Page Cache Write
+Xtool 0.8.9 (Razor12911)      Windows x64 (Wine)    489 MB     2m 18.000s    High-Thread Buffer Aggregation
+Precomp 0.48* (Christian S.)  Windows x64 (Wine)   80 MB     7m 16.821s    Monolithic Sequential / Intense Flags
+*Note: Precomp 0.48 flags: -cn -intense -t-pzgnfjsmb3 | Recompressed streams: 1859/1885 (Nitro & Xtool match ~696)
+**Note: Precomp 0.48 uses optimized compilation flags for cmake
+
+
+DECODE PHASE (Restoration & I/O Target Analysis)
+
+Tool & Configuration         Environment/Runtime   Peak RAM   Decode Time   Multi-Threading & I/O Profile
+---------------------------------------------------------------------------------------------------------------------------
+Precomp 0.48 (Classic)       Windows x64 (Wine)    33 MB      2m 59.043s    Hardcoded Monolithic Sequential Execution (3x Slower)
+Xtool 0.8.9 (Modern)         Windows x64 (Wine)    353 MB     2m 49.000s    High-Thread Buffer Aggregation (HDD Thrashing)
+Nitro NG v1.09     Windows x64 (Wine)    45 MB      2m 31.654s    Bounded Queue with 2 MB Core-Aware Disk Flushing
+Nitro NG v1.09 (Real HDD)    Linux Native (Raw)    51 MB      2m 00.947s    Pure Uncached Mechanical Plato I/O (Dropped Caches)
+Nitro NG v1.09 (Cached)      Linux Native (Raw)    46 MB      0m 46.000s    Native Linux Kernel Page-Cache Streaming Mode
+
+
+Conclusion: The implementation of runtime-aware backpressure and conditional memory 
+reclamation turns Nitro_NG v1.09 into an elastic architecture. It safely shrinks 
+historical multi-gigabyte memory leaks down to a baseline of 45-89 MB, transforming a 
+flawed multithreading attempt into a professional, hardware-respectful streaming engine.
+
+
+--------------------------------------------------------------------------------
+5. BUG FIXES & UX IMPROVEMENTS
+--------------------------------------------------------------------------------
+* Console Summary Fix
+- FIXED: Visual bug where "Levels" summary only displayed the last level
+- NOW: Correctly shows all levels with counts: "Levels: 6 (x693), 7 (x1)"
+- ROOT CAUSE: String accumulator used = instead of +=, overwriting previous levels
+
+* Progress Line Cleanup
+- IMPROVED: Final cleanup of progress line to prevent visual artifacts
+- NOW: Explicit CR+LF output before final summary
+- BENEFIT: Clean rendering on narrow terminals and Windows/Wine environments
+
+* Build System Improvements
+- FAST TOOLCHAIN DETECTION: Replaced slow `find /usr` scans with direct
+compiler queries ($CXX -print-file-name=libwinpthread.a)
+- LOCAL ZLIB 1.3.2: All build scripts compile local optimized zlib 1.3.2
+and link statically (no external zlib dependency)
+- PATH NORMALIZATION: Added readlink -f for cleaner winpthread path display
+
+--------------------------------------------------------------------------------
+6. VERIFICATION METRICS (v1.09)
+--------------------------------------------------------------------------------
+* Integrity: 100% verified, bit-for-bit restoration matches original input
+(MD5 confirmed)
+
+* RAM Footprint: Bounded and deterministic (~112 MB peak on encode, ~63.9 MB
+on decode for a 352 MB input with 694 streams)
+
+* UX Stability: Clean, single-line live progress with hidden console cursor
+and artifact-free space padding
+
+================================================================================
+FINAL NOTES
+================================================================================
+The journey from v1.05 HP to v1.09 represents a complete architectural
+transformation. We did not "polish" the existing code; we rewrote it from the
+ground up, eliminating components that worked well for typical workloads but
+could cause unbounded memory growth on extreme cases.
+
+The key insight was simple: if you verify streams in streaming mode (inflate →
+deflate → memcmp), you never need to store the decompressed data. This single
+change allowed us to eliminate the FNV-1a cache, the sharded dictionary cache,
+and the per-thread buffer pre-allocations, replacing them with a simpler, more
+efficient architecture.
+
+Version 1.09 is not just faster and more memory-efficient than v1.07 HP; it is
+fundamentally different in how it approaches the problem.
+================================================================================
+
+* Historical Context & Technical Respect:
+- Enforced strict acknowledgment of old-guard pillars (Precomp by Christian Schneider) 
+  and modern multi-core powerhouses (Xtool by Razor12911). They were the absolute 
+  pioneers of the scene. This benchmark explicitly contextualizes algorithmic behavioral 
+  shifts on legacy architectures rather than criticizing raw baseline throughput 
+  on high-end nodes.
+=================================================================================
+"And now, no more table talk. Let's get down to business."
+END OF FILE
+=================================================================================
